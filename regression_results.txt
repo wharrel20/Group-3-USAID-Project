@@ -1,0 +1,30 @@
+                            OLS Regression Results                            
+==============================================================================
+Dep. Variable:           GDP Growth %   R-squared:                       0.189
+Model:                            OLS   Adj. R-squared:                  0.042
+Method:                 Least Squares   F-statistic:                     1.283
+Date:                Wed, 15 Apr 2026   Prob (F-statistic):              0.307
+Time:                        22:17:34   Log-Likelihood:                -101.49
+No. Observations:                  27   AIC:                             213.0
+Df Residuals:                      22   BIC:                             219.5
+Df Model:                           4                                         
+Covariance Type:            nonrobust                                         
+========================================================================================
+                           coef    std err          t      P>|t|      [0.025      0.975]
+----------------------------------------------------------------------------------------
+const                   41.4209     20.699      2.001      0.058      -1.507      84.348
+log_disbursements       -2.9302      1.812     -1.617      0.120      -6.689       0.829
+log_obligations          0.3171      1.047      0.303      0.765      -1.855       2.489
+Execution Rate           0.1132      0.555      0.204      0.840      -1.038       1.265
+USAID Spending % GDP   215.5393    105.930      2.035      0.054      -4.145     435.224
+==============================================================================
+Omnibus:                        0.753   Durbin-Watson:                   1.937
+Prob(Omnibus):                  0.686   Jarque-Bera (JB):                0.695
+Skew:                           0.350   Prob(JB):                        0.706
+Kurtosis:                       2.644   Cond. No.                     1.04e+03
+==============================================================================
+
+Notes:
+[1] Standard Errors assume that the covariance matrix of the errors is correctly specified.
+[2] The condition number is large, 1.04e+03. This might indicate that there are
+strong multicollinearity or other numerical problems.
