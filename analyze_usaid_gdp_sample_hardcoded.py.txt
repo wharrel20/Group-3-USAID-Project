@@ -1,0 +1,301 @@
+
+"""
+USAID SME funding analysis script for IDLE.
+
+This version is hardcoded for:
+- Input file path
+- Output folder
+- Analysis years: 2021-2024
+
+
+"""
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+
+
+# -----------------------------
+# HARDCODED SETTINGS
+# -----------------------------
+INPUT_PATH = r"C:\Users\resho\Downloads\Data cut down to 9 coutries and GDP.xlsx"
+OUTPUT_DIR = r"C:\Users\resho\Downloads\usaid_analysis_output"
+
+START_YEAR = 2021
+END_YEAR = 2024
+
+CONTINENT_MAP = {
+    "Bangladesh": "Asia",
+    "Jordan": "Asia",
+    "Egypt": "Africa",
+    "Niger": "Africa",
+    "Ukraine": "Europe",
+    "Georgia": "Europe",
+    "Chile": "South America",
+    "Colombia": "South America",
+    "Papua New Guinea": "Oceania",
+}
+
+
+def signed_log1p(series: pd.Series) -> pd.Series:
+    """Handle positive and negative money values for regression."""
+    return np.sign(series) * np.log1p(np.abs(series))
+
+
+def load_data(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    raw = pd.read_excel(path, sheet_name="Sheet2")
+    gdp_src = pd.read_excel(path, sheet_name="Sheet1")
+    return raw, gdp_src
+
+
+def prepare_gdp_lookup(gdp_src: pd.DataFrame, countries: list[str]) -> pd.DataFrame:
+    gdp = gdp_src[gdp_src["Country Name"].isin(countries)][["Country Name", "Fiscal Year", "GDP (US dollars)"]].copy()
+    gdp["GDP (US dollars)"] = pd.to_numeric(
+        gdp["GDP (US dollars)"].astype(str).str.replace(",", "", regex=False),
+        errors="coerce",
+    )
+    gdp = gdp.groupby(["Country Name", "Fiscal Year"], as_index=False)["GDP (US dollars)"].max()
+    gdp = gdp[gdp["Fiscal Year"].between(START_YEAR, END_YEAR)].copy()
+    return gdp
+
+
+def build_outputs(raw: pd.DataFrame, gdp: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    raw = raw[raw["Fiscal Year"].between(START_YEAR, END_YEAR)].copy()
+    raw["Continent"] = raw["Country Name"].map(CONTINENT_MAP)
+
+    country_disb = (
+        raw[raw["Transaction Type Name"] == "Disbursements"]
+        .groupby(["Continent", "Country Name"], as_index=False)["current_amount"]
+        .sum()
+        .rename(columns={"current_amount": "Total Disbursements"})
+    )
+    country_disb["Continent Rank"] = (
+        country_disb.groupby("Continent")["Total Disbursements"]
+        .rank(method="dense", ascending=False)
+        .astype(int)
+    )
+    country_counts = country_disb.groupby("Continent")["Country Name"].transform("count")
+    country_disb["Funding Group"] = np.where(
+        country_counts == 1,
+        "Only sample country",
+        np.where(country_disb["Continent Rank"] == 1, "Highest funded in sample", "Lowest funded in sample"),
+    )
+    funding_group_map = country_disb.set_index("Country Name")["Funding Group"].to_dict()
+
+    cleaned = raw.copy()
+    cleaned["Funding Group"] = cleaned["Country Name"].map(funding_group_map)
+    cleaned = cleaned.merge(gdp, on=["Country Name", "Fiscal Year"], how="left")
+    cleaned.rename(columns={"GDP (US dollars)": "GDP (Current US$)"}, inplace=True)
+    cleaned["GDP Available"] = np.where(cleaned["GDP (Current US$)"].notna(), "Yes", "No")
+    cleaned["Negative Transaction"] = np.where(cleaned["current_amount"] < 0, "Yes", "No")
+
+    summary = (
+        cleaned.pivot_table(
+            index=["Continent", "Country Name", "Funding Group", "Fiscal Year"],
+            columns="Transaction Type Name",
+            values="current_amount",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .reset_index()
+        .merge(gdp, on=["Country Name", "Fiscal Year"], how="left")
+        .sort_values(["Country Name", "Fiscal Year"])
+        .reset_index(drop=True)
+    )
+
+    for col in ["Appropriated and Planned", "President's Budget Requests", "Obligations", "Disbursements"]:
+        if col not in summary.columns:
+            summary[col] = 0
+
+    summary["GDP Growth %"] = summary.groupby("Country Name")["GDP (US dollars)"].pct_change(fill_method=None) * 100
+    summary["Disbursement Change %"] = summary.groupby("Country Name")["Disbursements"].pct_change(fill_method=None) * 100
+    summary["Execution Rate"] = summary["Disbursements"] / summary["Obligations"].replace(0, np.nan)
+    summary["USAID Spending % GDP"] = summary["Disbursements"] / summary["GDP (US dollars)"] * 100
+
+    ranking = country_disb.copy()
+    return cleaned, summary, ranking
+
+
+def make_histogram(analysis_df: pd.DataFrame, output_dir: Path) -> Path:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(analysis_df["GDP Growth %"].dropna(), bins=8, edgecolor="black")
+    ax.set_title("Histogram of GDP Growth % (2021-2024 sample)")
+    ax.set_xlabel("GDP Growth %")
+    ax.set_ylabel("Frequency")
+    ax.grid(axis="y", alpha=0.3)
+    out_path = output_dir / "gdp_growth_histogram.png"
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return out_path
+
+
+def make_correlations(analysis_df: pd.DataFrame, output_dir: Path) -> tuple[pd.DataFrame, Path]:
+    corr_cols = [
+        "GDP Growth %",
+        "Disbursements",
+        "Obligations",
+        "Execution Rate",
+        "USAID Spending % GDP",
+        "Disbursement Change %",
+    ]
+    corr_df = analysis_df[corr_cols].corr()
+    out_path = output_dir / "correlation_matrix.csv"
+    corr_df.to_csv(out_path)
+    return corr_df, out_path
+
+
+def run_regression(analysis_df: pd.DataFrame, output_dir: Path) -> Path:
+    reg_df = analysis_df.copy()
+    reg_df["log_disbursements"] = signed_log1p(reg_df["Disbursements"])
+    reg_df["log_obligations"] = signed_log1p(reg_df["Obligations"])
+
+    model_df = reg_df[
+        ["GDP Growth %", "log_disbursements", "log_obligations", "Execution Rate", "USAID Spending % GDP"]
+    ].dropna().copy()
+
+    out_path = output_dir / "regression_results.txt"
+    if len(model_df) < 8:
+        out_path.write_text("Not enough complete observations to run a stable multivariate regression.", encoding="utf-8")
+        return out_path
+
+    y = model_df["GDP Growth %"]
+    X = model_df[["log_disbursements", "log_obligations", "Execution Rate", "USAID Spending % GDP"]]
+    X = sm.add_constant(X)
+    model = sm.OLS(y, X).fit()
+    out_path.write_text(model.summary().as_text(), encoding="utf-8")
+    return out_path
+
+
+def build_gdp_funding_summary(summary: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+    gdp_funding_df = summary[["Continent", "Country Name", "Fiscal Year", "Disbursements", "GDP (US dollars)"]].dropna().copy()
+    corr_value = gdp_funding_df["Disbursements"].corr(gdp_funding_df["GDP (US dollars)"])
+    return gdp_funding_df, corr_value
+
+
+def make_gdp_funding_visual(gdp_funding_df: pd.DataFrame, output_dir: Path) -> Path:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.scatter(gdp_funding_df["Disbursements"], gdp_funding_df["GDP (US dollars)"])
+    ax.set_title("GDP vs Disbursements (Country-Year)")
+    ax.set_xlabel("Disbursements")
+    ax.set_ylabel("GDP (US dollars)")
+    ax.ticklabel_format(style="plain", axis="both")
+    ax.grid(alpha=0.3)
+    out_path = output_dir / "gdp_vs_disbursements_scatter.png"
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return out_path
+
+
+def build_change_summary(summary: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+    change_df = summary[["Continent", "Country Name", "Fiscal Year", "GDP Growth %", "Disbursement Change %"]].dropna().copy()
+    corr_value = change_df["GDP Growth %"].corr(change_df["Disbursement Change %"])
+    return change_df, corr_value
+
+
+def make_change_visual(change_df: pd.DataFrame, output_dir: Path) -> Path:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.scatter(change_df["Disbursement Change %"], change_df["GDP Growth %"])
+    ax.set_title("GDP Growth % vs Disbursement Change % (Country-Year)")
+    ax.set_xlabel("Disbursement Change %")
+    ax.set_ylabel("GDP Growth %")
+    ax.grid(alpha=0.3)
+    out_path = output_dir / "gdp_growth_vs_disbursement_change_scatter.png"
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return out_path
+
+
+def build_text_summary(cleaned: pd.DataFrame, summary: pd.DataFrame, ranking: pd.DataFrame, corr_df: pd.DataFrame, gdp_funding_corr: float, change_corr: float) -> str:
+    analysis_rows = summary.dropna(subset=["GDP Growth %"]).copy()
+
+    lines = []
+    lines.append("USAID SME Funding Sample Analysis")
+    lines.append("--------------------------------")
+    lines.append(f"Input file: {INPUT_PATH}")
+    lines.append(f"Analysis years: {START_YEAR}-{END_YEAR}")
+    lines.append(f"Transaction rows analyzed: {len(cleaned)}")
+    lines.append(f"Country-year rows analyzed: {len(summary)}")
+    lines.append(f"Rows with GDP growth available: {len(analysis_rows)}")
+    lines.append("")
+    lines.append("Highest/lowest funded country within each sampled continent (based on total disbursements):")
+    for _, row in ranking.sort_values(["Continent", "Continent Rank"]).iterrows():
+        lines.append(
+            f"- {row['Continent']}: {row['Country Name']} | ${row['Total Disbursements']:,.0f} | {row['Funding Group']}"
+        )
+    lines.append("")
+    lines.append("Pairwise correlations with GDP Growth %:")
+    for col in ["Disbursements", "Obligations", "Execution Rate", "USAID Spending % GDP", "Disbursement Change %"]:
+        value = corr_df.loc["GDP Growth %", col]
+        lines.append(f"- {col}: {value:.4f}" if pd.notna(value) else f"- {col}: NA")
+    lines.append("")
+    lines.append("GDP and funding correlation (country-year level):")
+    lines.append(f"- Correlation between GDP and disbursements: {gdp_funding_corr:.4f}" if pd.notna(gdp_funding_corr) else "- Correlation between GDP and disbursements: NA")
+    lines.append("")
+    lines.append("GDP growth and disbursement change correlation (country-year level):")
+    lines.append(f"- Correlation between GDP Growth % and Disbursement Change %: {change_corr:.4f}" if pd.notna(change_corr) else "- Correlation between GDP Growth % and Disbursement Change %: NA")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main() -> None:
+    input_path = Path(INPUT_PATH)
+    output_dir = Path(OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not input_path.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {input_path}\n\n"
+            "Update INPUT_PATH at the top of the script so it matches the location of your Excel file."
+        )
+
+    raw, gdp_src = load_data(input_path)
+    countries = sorted(raw["Country Name"].dropna().unique().tolist())
+    gdp = prepare_gdp_lookup(gdp_src, countries)
+
+    cleaned, summary, ranking = build_outputs(raw, gdp)
+    analysis_df = summary.dropna(subset=["GDP Growth %"]).copy()
+
+    # Save datasets
+    cleaned.to_csv(output_dir / "cleaned_transactions.csv", index=False)
+    summary.to_csv(output_dir / "model_ready_country_year.csv", index=False)
+    ranking.to_csv(output_dir / "country_ranking.csv", index=False)
+
+    # Core analysis outputs
+    histogram_path = make_histogram(analysis_df, output_dir)
+    corr_df, corr_path = make_correlations(analysis_df, output_dir)
+    regression_path = run_regression(analysis_df, output_dir)
+
+    # GDP vs funding correlation and visual (country-year level)
+    gdp_funding_df, gdp_funding_corr = build_gdp_funding_summary(summary)
+    gdp_funding_df.to_csv(output_dir / "gdp_funding_summary.csv", index=False)
+    gdp_funding_visual_path = make_gdp_funding_visual(gdp_funding_df, output_dir)
+
+    # GDP growth vs disbursement change correlation and visual (country-year level)
+    change_df, change_corr = build_change_summary(summary)
+    change_df.to_csv(output_dir / "gdp_growth_disbursement_change_summary.csv", index=False)
+    change_visual_path = make_change_visual(change_df, output_dir)
+
+    summary_text = build_text_summary(cleaned, summary, ranking, corr_df, gdp_funding_corr, change_corr)
+    summary_path = output_dir / "analysis_summary.txt"
+    summary_path.write_text(summary_text, encoding="utf-8")
+
+    print(summary_text)
+    print("")
+    print(f"Histogram saved to: {histogram_path}")
+    print(f"Correlation matrix saved to: {corr_path}")
+    print(f"Regression results saved to: {regression_path}")
+    print(f"GDP vs funding summary saved to: {output_dir / 'gdp_funding_summary.csv'}")
+    print(f"GDP vs funding visual saved to: {gdp_funding_visual_path}")
+    print(f"GDP growth vs disbursement change summary saved to: {output_dir / 'gdp_growth_disbursement_change_summary.csv'}")
+    print(f"GDP growth vs disbursement change visual saved to: {change_visual_path}")
+    print(f"All output files saved to: {output_dir.resolve()}")
+
+
+if __name__ == "__main__":
+    main()

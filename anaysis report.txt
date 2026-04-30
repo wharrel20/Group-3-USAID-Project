@@ -1,0 +1,31 @@
+USAID SME Funding Sample Analysis
+--------------------------------
+Input file: C:\Users\resho\Downloads\Data cut down to 9 coutries and GDP.xlsx
+Analysis years: 2021-2024
+Transaction rows analyzed: 215
+Country-year rows analyzed: 36
+Rows with GDP growth available: 27
+
+Highest/lowest funded country within each sampled continent (based on total disbursements):
+- Africa: Egypt | $178,666,771 | Highest funded in sample
+- Africa: Niger | $3,887,677 | Lowest funded in sample
+- Asia: Jordan | $128,605,313 | Highest funded in sample
+- Asia: Bangladesh | $10,039,576 | Lowest funded in sample
+- Europe: Ukraine | $307,023,767 | Highest funded in sample
+- Europe: Georgia | $80,731,020 | Lowest funded in sample
+- Oceania: Papua New Guinea | $5,133,647 | Only sample country
+- South America: Colombia | $3,794,736 | Highest funded in sample
+- South America: Chile | $982,781 | Lowest funded in sample
+
+Pairwise correlations with GDP Growth %:
+- Disbursements: -0.1028
+- Obligations: 0.0082
+- Execution Rate: 0.1368
+- USAID Spending % GDP: 0.2337
+- Disbursement Change %: 0.1513
+
+GDP and funding correlation (country-year level):
+- Correlation between GDP and disbursements: 0.0017
+
+GDP growth and disbursement change correlation (country-year level):
+- Correlation between GDP Growth % and Disbursement Change %: 0.1513
